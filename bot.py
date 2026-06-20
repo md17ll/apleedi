@@ -13,15 +13,12 @@ from telegram.ext import (
 )
 from playwright.async_api import async_playwright
 
-# إعداد الـ Logging لمراقبة العمليات في سيرفر Railway
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# قراءة توكن البوت والبروكسي من الـ Variables في Railway بأمان
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 PROXY_SERVER = os.getenv("PROXY_SERVER") 
 
-# تحديد مراحل المحادثة (States)
 (
     START_PROCESS,
     GET_FIRST_NAME,
@@ -36,19 +33,14 @@ PROXY_SERVER = os.getenv("PROXY_SERVER")
     GET_RESCUE_CODE
 ) = range(11)
 
-# دالة مساعدة لفحص صيغة التاريخ (يوم/شهر/سنة)
 def is_valid_date(date_str):
     return bool(re.match(r'^(0[1-9]|[12][0-9]|3[01])/(0[1-9]|1[012])/(19|20)\d\d$', date_str))
 
-# دالة مساعدة لفحص صيغة البريد الإلكتروني
 def is_valid_email(email_str):
     return bool(re.match(r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$', email_str))
 
-# بدء تشغيل المتصفح والجلسة
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     query = update.callback_query
-    
-    # تنظيف الجلسات القديمة إن وجدت لحفظ موارد السيرفر
     await close_browser_context(context)
     
     text = "🤖 **مرحباً بك في لوحة تحكم مساعد حسابات آبل الذكي**\n\nالمتصفح جاهز الآن في الخلفية على بيئة سيرفر Railway."
@@ -71,27 +63,24 @@ async def start_create(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
     await query.edit_message_text(text="⏳ جاري إطلاق المتصفح الآمن والتوجه لموقع آبل...")
     
     try:
-        # إعداد تشغيل المتصفح مع البروكسي إن وجد لتفادي الحظر
         playwright = await async_playwright().start()
         browser_args = {}
         if PROXY_SERVER:
             browser_args['proxy'] = {"server": PROXY_SERVER}
             
         browser = await playwright.chromium.launch(headless=True, **browser_args)
-        page = await browser.new_page()
         
-        # التوجه لرابط إنشاء الحساب
+        # [تعديل] إضافة User-Agent لتبدو الجلسة كمتصفح طبيعي تماماً
+        user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+        page = await browser.new_page(user_agent=user_agent)
+        
         await page.goto("https://appleid.apple.com/account", timeout=60000)
-        
-        # [تعديل] إجبار المتصفح على انتظار تحميل الصفحة واستقرار الشبكة تماماً لمنع الـ Timeout
         await page.wait_for_load_state("networkidle")
         
-        # تخزين كائنات المتصفح في الـ context
         context.user_data['playwright'] = playwright
         context.user_data['browser'] = browser
         context.user_data['page'] = page
         
-        # الانتقال لطلب الاسم الأول
         keyboard = [[InlineKeyboardButton("❌ إلغاء العملية", callback_data="btn_cancel")]]
         await query.edit_message_text(
             text="📝 من فضلك أدخل **الاسم الأول** الآن (بالأحرف فقط):",
@@ -102,15 +91,13 @@ async def start_create(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
         
     except Exception as e:
         logger.error(f"Error starting browser: {e}")
-        await query.edit_message_text("❌ حدث خطأ أثناء تشغيل المتصفح أو تحميل الصفحة في السيرفر. يرجى إعادة المحاولة.")
+        await query.edit_message_text("❌ حدث خطأ أثناء تشغيل المتصفح. يرجى إعادة المحاولة.")
         await close_browser_context(context)
         return ConversationHandler.END
 
-# استقبال الاسم الأول والفحص
 async def process_first_name(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     first_name = update.message.text.strip()
     
-    # فحص ذكي: التأكد أن الاسم لا يحتوي على أرقام أو رموز
     if not first_name.isalpha():
         await update.message.reply_text("⚠️ الاسم غير صالح! يرجى إرسال الاسم الأول باستخدام الحروف فقط:")
         return GET_FIRST_NAME
@@ -119,13 +106,26 @@ async def process_first_name(update: Update, context: ContextTypes.DEFAULT_TYPE)
     page = context.user_data['page']
     
     try:
-        # [تعديل ذكي] البحث عن الخانة برمجياً من خلال الـ Placeholder بدقة مرنة لتخطي الـ Timeout
-        await page.get_by_placeholder("First Name", exact=False).fill(first_name)
+        # المحاولة الأولى بالبحث الذكي
+        await page.get_by_placeholder("First Name", exact=False).fill(first_name, timeout=15000)
     except Exception:
-        # حل بديل إذا كان السيرفر يقرأ الواجهة بلغة أخرى
-        await page.fill('input[name="firstName"]', first_name)
+        try:
+            # المحاولة البديلة بالـ Selector القياسي
+            await page.fill('input[name="firstName"]', first_name, timeout=5000)
+        except Exception as err:
+            # [ميزة ذكية] إذا فشل تماماً، يلتقط صورة للموقع ويرسلها لك لتشاهد الحظر أو الخطأ بنفسك
+            logger.error(f"Failed to fill first name: {err}")
+            screenshot_path = "error_screen.png"
+            await page.screenshot(path=screenshot_path)
+            
+            await update.message.reply_text("⚠️ علق المتصفح ولم يجد الخانة. إليك لقطة شاشة لما يظهر لآبل حالياً بالخلفية:")
+            with open(screenshot_path, 'rb') as photo:
+                await update.message.reply_photo(photo=photo)
+                
+            await update.message.reply_text("ملاحظة: إذا ظهرت الصفحة بيضاء أو بها رسالة حظر، فأنت بحاجة لإضافة البروكسي المنزلي في الـ Variables.")
+            await close_browser_context(context)
+            return ConversationHandler.END
     
-    # عرض الرسالة المحدثة مع زر الرجوع الشفاف
     keyboard = [[InlineKeyboardButton("⬅️ رجوع لتعديل الاسم الأول", callback_data="back_to_start")]]
     await update.message.reply_text(
         text=f"✅ تم حفظ الاسم الأول: *{first_name}*\n\n📝 من فضلك أدخل **اسم العائلة (اللقب)** الآن:",
@@ -134,7 +134,6 @@ async def process_first_name(update: Update, context: ContextTypes.DEFAULT_TYPE)
     )
     return GET_LAST_NAME
 
-# استقبال اسم العائلة والفحص
 async def process_last_name(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     last_name = update.message.text.strip()
     
@@ -146,7 +145,7 @@ async def process_last_name(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     page = context.user_data['page']
     
     try:
-        await page.get_by_placeholder("Last Name", exact=False).fill(last_name)
+        await page.get_by_placeholder("Last Name", exact=False).fill(last_name, timeout=10000)
     except Exception:
         await page.fill('input[name="lastName"]', last_name)
     
@@ -158,7 +157,6 @@ async def process_last_name(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     )
     return GET_BIRTH_DATE
 
-# استقبال تاريخ الميلاد والفحص
 async def process_birth_date(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     birth_date = update.message.text.strip()
     
@@ -171,7 +169,7 @@ async def process_birth_date(update: Update, context: ContextTypes.DEFAULT_TYPE)
     
     day, month, year = birth_date.split('/')
     try:
-        await page.get_by_placeholder("dd").fill(day)
+        await page.get_by_placeholder("dd").fill(day, timeout=5000)
         await page.get_by_placeholder("mm").fill(month)
         await page.get_by_placeholder("yyyy").fill(year)
     except Exception:
@@ -187,7 +185,6 @@ async def process_birth_date(update: Update, context: ContextTypes.DEFAULT_TYPE)
     )
     return GET_EMAIL
 
-# استقبال البريد الإلكتروني الأساسي
 async def process_email(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     email = update.message.text.strip().lower()
     
@@ -199,7 +196,7 @@ async def process_email(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
     page = context.user_data['page']
     
     try:
-        await page.get_by_placeholder("name@example.com", exact=False).fill(email)
+        await page.get_by_placeholder("name@example.com", exact=False).fill(email, timeout=10000)
     except Exception:
         await page.fill('input[name="emailAddress"]', email)
         
@@ -216,7 +213,6 @@ async def process_email(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
     )
     return GET_EMAIL_CODE
 
-# استقبال كود تفعيل الإيميل الأول
 async def process_email_code(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     code = update.message.text.strip()
     
@@ -236,13 +232,12 @@ async def process_email_code(update: Update, context: ContextTypes.DEFAULT_TYPE)
     )
     return GET_PHONE
 
-# استقبال رقم الهاتف المؤقت
 async def process_phone(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     phone = update.message.text.strip()
     page = context.user_data['page']
     
     try:
-        await page.get_by_placeholder("Phone Number", exact=False).fill(phone)
+        await page.get_by_placeholder("Phone Number", exact=False).fill(phone, timeout=10000)
     except Exception:
         await page.fill('input[name="phoneNumber"]', phone)
         
@@ -253,13 +248,12 @@ async def process_phone(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
         [InlineKeyboardButton("🔄 إعادة إرسال كود الهاتف", callback_data="resend_sms_code")]
     ]
     await update.message.reply_text(
-        text=f"📨 تم إرسال طلب الرمز إلى الرقم: *{phone}*\n\nعندما يصلك الكود من موقع الأرقام، أرسله لي هنا فوراً لتأكيد الحساب ودخول لوحة التحكم:",
+        text=f"📨 تم إرسال طلب الرمز إلى الرقم: *{phone}*\n\nعندما يصلك الكود من موقع الأرقام, أرسله لي هنا فوراً لتأكيد الحساب ودخول لوحة التحكم:",
         reply_markup=InlineKeyboardMarkup(keyboard),
         parse_mode="Markdown"
     )
     return GET_PHONE_CODE
 
-# تفعيل الهاتف ودخول لوحة التحكم (التحول الذكي لخطوة 6)
 async def process_phone_code(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     code = update.message.text.strip()
     page = context.user_data['page']
@@ -280,7 +274,6 @@ async def process_phone_code(update: Update, context: ContextTypes.DEFAULT_TYPE)
     )
     return DASHBOARD_PANEL
 
-# طلب بريد الاسترداد لربطه بالزر الذكي النهائي
 async def start_rescue(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     query = update.callback_query
     await query.answer()
@@ -314,7 +307,6 @@ async def process_rescue_email(update: Update, context: ContextTypes.DEFAULT_TYP
     )
     return GET_RESCUE_CODE
 
-# تنفيذ الأتمتة الفاصلة الذكية (خطوة رقم 6 الذكية جداً بنقرة واحدة)
 async def process_smart_cleanup(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     query = update.callback_query
     if query:
@@ -354,13 +346,11 @@ async def process_smart_cleanup(update: Update, context: ContextTypes.DEFAULT_TY
     await close_browser_context(context)
     return ConversationHandler.END
 
-# تخزين الكود الخاص بالاسترداد مؤقتاً قبل ضغط الزر الذكي
 async def save_rescue_code(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     context.user_data['last_rescue_code'] = update.message.text.strip()
     await update.message.reply_text("📥 تم تسجيل الكود برمجياً في السيرفر. اضغط الآن على الزر الشفاف أعلاه لبدء عملية التطهير الفورية.")
     return GET_RESCUE_CODE
 
-# معالجة أزرار الرجوع الشفافة وتحديث محتوى الرسائل (نظام الـ Edit)
 async def handle_back_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     query = update.callback_query
     await query.answer()
@@ -384,7 +374,6 @@ async def handle_back_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE
         await query.edit_message_text(text="🔄 تم إرسال طلب كود جديد للإيميل من سيرفر آبل. أرسل الكود الجديد هنا:")
         return GET_EMAIL_CODE
 
-# دالة مساعدة لإغلاق المتصفح وتنظيف ذاكرة Railway
 async def close_browser_context(context: ContextTypes.DEFAULT_TYPE):
     if 'browser' in context.user_data:
         try:
@@ -394,7 +383,6 @@ async def close_browser_context(context: ContextTypes.DEFAULT_TYPE):
             pass
     context.user_data.clear()
 
-# إلغاء العملية بالكامل وتنظيف السيرفر
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     query = update.callback_query
     if query:
@@ -408,7 +396,7 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
 
 def main():
     if not TOKEN:
-        print("❌ خطأ: لم يتم العثور على TELEGRAM_BOT_TOKEN في متغيرات البيئة (Variables)!")
+        print("❌ خطأ: لم يتم العثور على TELEGRAM_BOT_TOKEN في متغيرات البيئة!")
         return
 
     app = Application.builder().token(TOKEN).build()
@@ -447,8 +435,6 @@ def main():
     )
     
     app.add_handler(conv_handler)
-    
-    print("🚀 البوت يعمل الآن على خوادم Railway ومستعد لتلقي الأوامر...")
     app.run_polling()
 
 if __name__ == '__main__':

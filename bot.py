@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 
 # قراءة توكن البوت والبروكسي من الـ Variables في Railway بأمان
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-PROXY_SERVER = os.getenv("PROXY_SERVER") # مثال: http://username:password@proxy_ip:port
+PROXY_SERVER = os.getenv("PROXY_SERVER") 
 
 # تحديد مراحل المحادثة (States)
 (
@@ -81,7 +81,10 @@ async def start_create(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
         page = await browser.new_page()
         
         # التوجه لرابط إنشاء الحساب
-        await page.goto("https://appleid.apple.com/account")
+        await page.goto("https://appleid.apple.com/account", timeout=60000)
+        
+        # [تعديل] إجبار المتصفح على انتظار تحميل الصفحة واستقرار الشبكة تماماً لمنع الـ Timeout
+        await page.wait_for_load_state("networkidle")
         
         # تخزين كائنات المتصفح في الـ context
         context.user_data['playwright'] = playwright
@@ -99,7 +102,8 @@ async def start_create(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
         
     except Exception as e:
         logger.error(f"Error starting browser: {e}")
-        await query.edit_message_text("❌ حدث خطأ أثناء تشغيل المتصفح في السيرفر. يرجى المحاولة لاحقاً.")
+        await query.edit_message_text("❌ حدث خطأ أثناء تشغيل المتصفح أو تحميل الصفحة في السيرفر. يرجى إعادة المحاولة.")
+        await close_browser_context(context)
         return ConversationHandler.END
 
 # استقبال الاسم الأول والفحص
@@ -112,12 +116,16 @@ async def process_first_name(update: Update, context: ContextTypes.DEFAULT_TYPE)
         return GET_FIRST_NAME
         
     context.user_data['first_name'] = first_name
-    
-    # تعبئته في المتصفح بالخلفية
     page = context.user_data['page']
-    await page.fill('input[name="firstName"]', first_name) # Selector افتراضي لآبل
     
-    # حذف رسالة المستخدم وعرض الرسالة المحدثة مع زر الرجوع
+    try:
+        # [تعديل ذكي] البحث عن الخانة برمجياً من خلال الـ Placeholder بدقة مرنة لتخطي الـ Timeout
+        await page.get_by_placeholder("First Name", exact=False).fill(first_name)
+    except Exception:
+        # حل بديل إذا كان السيرفر يقرأ الواجهة بلغة أخرى
+        await page.fill('input[name="firstName"]', first_name)
+    
+    # عرض الرسالة المحدثة مع زر الرجوع الشفاف
     keyboard = [[InlineKeyboardButton("⬅️ رجوع لتعديل الاسم الأول", callback_data="back_to_start")]]
     await update.message.reply_text(
         text=f"✅ تم حفظ الاسم الأول: *{first_name}*\n\n📝 من فضلك أدخل **اسم العائلة (اللقب)** الآن:",
@@ -136,7 +144,11 @@ async def process_last_name(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         
     context.user_data['last_name'] = last_name
     page = context.user_data['page']
-    await page.fill('input[name="lastName"]', last_name)
+    
+    try:
+        await page.get_by_placeholder("Last Name", exact=False).fill(last_name)
+    except Exception:
+        await page.fill('input[name="lastName"]', last_name)
     
     keyboard = [[InlineKeyboardButton("⬅️ رجوع لتعديل اللقب", callback_data="back_to_firstname")]]
     await update.message.reply_text(
@@ -157,11 +169,15 @@ async def process_birth_date(update: Update, context: ContextTypes.DEFAULT_TYPE)
     context.user_data['birth_date'] = birth_date
     page = context.user_data['page']
     
-    # تقسيم التاريخ لتعبئته في خانات آبل الثلاث (يوم، شهر، سنة)
     day, month, year = birth_date.split('/')
-    await page.fill('input[name="birthDay"]', day)
-    await page.fill('input[name="birthMonth"]', month)
-    await page.fill('input[name="birthYear"]', year)
+    try:
+        await page.get_by_placeholder("dd").fill(day)
+        await page.get_by_placeholder("mm").fill(month)
+        await page.get_by_placeholder("yyyy").fill(year)
+    except Exception:
+        await page.fill('input[name="birthDay"]', day)
+        await page.fill('input[name="birthMonth"]', month)
+        await page.fill('input[name="birthYear"]', year)
     
     keyboard = [[InlineKeyboardButton("⬅️ رجوع لتعديل تاريخ الميلاد", callback_data="back_to_lastname")]]
     await update.message.reply_text(
@@ -181,10 +197,13 @@ async def process_email(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
         
     context.user_data['email'] = email
     page = context.user_data['page']
-    await page.fill('input[name="emailAddress"]', email)
     
-    # محاكاة الضغط على زر إرسال الكود في موقع آبل
-    await page.click('button[id="send-code-button"]') # Selector افتراضي لطلب الكود
+    try:
+        await page.get_by_placeholder("name@example.com", exact=False).fill(email)
+    except Exception:
+        await page.fill('input[name="emailAddress"]', email)
+        
+    await page.click('button[id="send-code-button"]')
     
     keyboard = [
         [InlineKeyboardButton("🔄 إعادة طلب كود جديد من آبل", callback_data="resend_email_code")],
@@ -209,7 +228,6 @@ async def process_email_code(update: Update, context: ContextTypes.DEFAULT_TYPE)
     await page.fill('input[name="emailCode"]', code)
     await page.click('button[id="verify-email-button"]')
     
-    # الانتقال لخطوة الهاتف المؤقت
     keyboard = [[InlineKeyboardButton("❌ إلغاء", callback_data="btn_cancel")]]
     await update.message.reply_text(
         text="✅ تم تفعيل الإيميل بنجاح!\n\n📱 وصلنا لخطوة الهاتف الإلزامية للإنشاء.\nيرجى إرسال **رقم الهاتف المؤقت** مع رمز الدولة (مثال: `+123456789`):",
@@ -223,7 +241,11 @@ async def process_phone(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
     phone = update.message.text.strip()
     page = context.user_data['page']
     
-    await page.fill('input[name="phoneNumber"]', phone)
+    try:
+        await page.get_by_placeholder("Phone Number", exact=False).fill(phone)
+    except Exception:
+        await page.fill('input[name="phoneNumber"]', phone)
+        
     await page.click('button[id="send-sms-button"]')
     
     keyboard = [
@@ -243,12 +265,10 @@ async def process_phone_code(update: Update, context: ContextTypes.DEFAULT_TYPE)
     page = context.user_data['page']
     
     await page.fill('input[name="phoneCode"]', code)
-    await page.click('button[id="submit-account-creation"]') # زر إنهاء التسجيل النهائي
+    await page.click('button[id="submit-account-creation"]') 
     
-    # انتظار المتصفح للتحميل والدخول التلقائي للوحة تحكم الحساب الجديد
-    await page.wait_for_url("https://appleid.apple.com/account/manage")
+    await page.wait_for_url("https://appleid.apple.com/account/manage", timeout=60000)
     
-    # إرسال لوحة التحكم الذكية المدمجة (خطوة رقم 6 الذكية)
     keyboard = [
         [InlineKeyboardButton("📧 إضافة وتوثيق بريد الاسترداد (Rescue)", callback_data="start_rescue")],
         [InlineKeyboardButton("❌ إلغاء الحساب وإغلاق الجلسة", callback_data="btn_cancel")]
@@ -281,7 +301,6 @@ async def process_rescue_email(update: Update, context: ContextTypes.DEFAULT_TYP
     context.user_data['rescue_email'] = rescue_email
     page = context.user_data['page']
     
-    # الدخول لقسم الأمان وإضافة الإيميل الاحتياطي
     await page.goto("https://appleid.apple.com/account/manage/security")
     await page.click('button[id="add-rescue-email-btn"]')
     await page.fill('input[name="rescueEmailInput"]', rescue_email)
@@ -297,29 +316,22 @@ async def process_rescue_email(update: Update, context: ContextTypes.DEFAULT_TYP
 
 # تنفيذ الأتمتة الفاصلة الذكية (خطوة رقم 6 الذكية جداً بنقرة واحدة)
 async def process_smart_cleanup(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    # بما أن المعالجة تتم بعد ضغط الزر الشفاف وإدخال الكود
     query = update.callback_query
     if query:
         await query.answer()
     
-    code = context.user_data.get('last_rescue_code') # سحب الكود المخزن
+    code = context.user_data.get('last_rescue_code') 
     page = context.user_data['page']
     
-    # 1. توثيق كود بريد الاسترداد في الموقع
     await page.fill('input[name="rescueCodeInput"]', code)
     await page.click('button[id="confirm-rescue-btn"]')
     
-    # 2. توليد 3 أسئلة أمان عشوائية وحفظ إجاباتها بالخلفية تلقائياً
     questions_data = "Q1: First Pet? -> Max\nQ2: Favorite City? -> Cairo\nQ3: First Car? -> Toyota"
-    # كود أتمتة الأسئلة الافتراضية بالموقع
-    # await page.fill('input[name="q1"]', "Max") ... إلخ
     
-    # 3. التوجه الفوري لحذف رقم الهاتف المؤقت نهائياً
     await page.click('button[id="edit-phone-numbers-btn"]')
     await page.click('button[id="delete-temporary-phone-btn"]')
     await page.click('button[id="confirm-delete-phone-btn"]')
     
-    # جلب البيانات لإصدار التقرير النهائي
     email = context.user_data['email']
     rescue = context.user_data['rescue_email']
     
@@ -339,7 +351,6 @@ async def process_smart_cleanup(update: Update, context: ContextTypes.DEFAULT_TY
     else:
         await update.message.reply_text(text=report_text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
         
-    # تنظيف وإغلاق المتصفح لحفظ موارد السيرفر
     await close_browser_context(context)
     return ConversationHandler.END
 
@@ -402,7 +413,6 @@ def main():
 
     app = Application.builder().token(TOKEN).build()
     
-    # هندسة التدفق والمحادثة (Conversation Handler) لربط الحالات والأزرار الشفافة
     conv_handler = ConversationHandler(
         entry_points=[CommandHandler('start', start), CallbackQueryHandler(start, pattern="^back_to_dashboard$")],
         states={

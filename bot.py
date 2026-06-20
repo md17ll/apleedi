@@ -25,13 +25,15 @@ PROXY_SERVER = os.getenv("PROXY_SERVER")
     GET_LAST_NAME,
     GET_BIRTH_DATE,
     GET_EMAIL,
+    GET_PASSWORD,
+    GET_PASSWORD_CONFIRM,
     GET_EMAIL_CODE,
     GET_PHONE,
     GET_PHONE_CODE,
     DASHBOARD_PANEL,
     GET_RESCUE_EMAIL,
     GET_RESCUE_CODE
-) = range(11)
+) = range(13)
 
 def is_valid_date(date_str):
     return bool(re.match(r'^(0[1-9]|[12][0-9]|3[01])/(0[1-9]|1[012])/(19|20)\d\d$', date_str))
@@ -39,23 +41,18 @@ def is_valid_date(date_str):
 def is_valid_email(email_str):
     return bool(re.match(r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$', email_str))
 
-# دالة ذكية مخصصة للكتابة بمحاكاة بشرية داخل خانات آبل المعقدة
-async def human_type(page, placeholder_text, fallback_selector, text_to_write):
-    try:
-        # محاولة العثور على العنصر والتركيز عليه
-        element = page.get_by_placeholder(placeholder_text, exact=False)
-        await element.scroll_into_view_if_needed()
-        await element.click(timeout=8000)
-        await element.press("Control+A")
-        await element.press("Backspace")
-        await element.type(text_to_write, delay=100) # كتابة مع تأخير بسيط لمحاكاة البشر
-    except Exception:
-        # حل بديل عبر الـ Selector الأساسي إذا فشل الـ Placeholder
-        await page.scroll_into_view_if_needed(fallback_selector)
-        await page.click(fallback_selector, timeout=5000)
-        await page.press(fallback_selector, "Control+A")
-        await page.press(fallback_selector, "Backspace")
-        await page.type(fallback_selector, text_to_write, delay=100)
+# [تعديل جذري] دالة ذكية لحقن القيمة مباشرة في متصفح آبل لتخطي الحماية
+async def inject_value_by_selector(page, selector, value):
+    await page.wait_for_selector(selector, timeout=10000)
+    await page.evaluate(f"""
+        const el = document.querySelector('{selector}');
+        if (el) {{
+            el.value = '{value}';
+            el.dispatchEvent(new Event('input', {{ bubbles: true }}));
+            el.dispatchEvent(new Event('change', {{ bubbles: true }}));
+            el.blur();
+        }}
+    """)
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     query = update.callback_query
@@ -91,9 +88,12 @@ async def start_create(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
         user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
         page = await browser.new_page(user_agent=user_agent)
         
+        # حجب خاصية الأتمتة لكي لا تكتشف آبل أن السيرفر روبوت
+        await page.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
+        
         await page.goto("https://appleid.apple.com/account", timeout=60000)
         await page.wait_for_load_state("networkidle")
-        await page.wait_for_timeout(3000) # وقت إضافي للتأكد من استقرار الواجهة
+        await page.wait_for_timeout(4000)
         
         context.user_data['playwright'] = playwright
         context.user_data['browser'] = browser
@@ -124,14 +124,14 @@ async def process_first_name(update: Update, context: ContextTypes.DEFAULT_TYPE)
     page = context.user_data['page']
     
     try:
-        # استخدام الدالة الذكية المحدثة للكتابة والمحاكاة البشرية
-        await human_type(page, "First Name", 'input[name="firstName"]', first_name)
+        # استخدام الحقن المباشر في كود الصفحة لتخطي أزمة لقطة الشاشة السابقة
+        await inject_value_by_selector(page, 'input[aria-label="First Name"], input[name="firstName"]', first_name)
     except Exception as err:
         logger.error(f"Failed to fill first name: {err}")
         screenshot_path = "error_screen.png"
         await page.screenshot(path=screenshot_path)
         
-        await update.message.reply_text("⚠️ عجز البوت عن إدخال الاسم بالخلفية. إليك لقطة الشاشة الحالية للموقع:")
+        await update.message.reply_text("⚠️ عجز البوت عن إدخال الاسم. إليك لقطة الشاشة الحالية للموقع:")
         with open(screenshot_path, 'rb') as photo:
             await update.message.reply_photo(photo=photo)
         await close_browser_context(context)
@@ -156,7 +156,7 @@ async def process_last_name(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     page = context.user_data['page']
     
     try:
-        await human_type(page, "Last Name", 'input[name="lastName"]', last_name)
+        await inject_value_by_selector(page, 'input[aria-label="Last Name"], input[name="lastName"]', last_name)
     except Exception:
         pass
     
@@ -180,15 +180,15 @@ async def process_birth_date(update: Update, context: ContextTypes.DEFAULT_TYPE)
     
     day, month, year = birth_date.split('/')
     try:
-        await human_type(page, "dd", 'input[name="birthDay"]', day)
-        await human_type(page, "mm", 'input[name="birthMonth"]', month)
-        await human_type(page, "yyyy", 'input[name="birthYear"]', year)
+        await inject_value_by_selector(page, 'input[aria-label="Day"], input[name="birthDay"]', day)
+        await inject_value_by_selector(page, 'input[aria-label="Month"], input[name="birthMonth"]', month)
+        await inject_value_by_selector(page, 'input[aria-label="Year"], input[name="birthYear"]', year)
     except Exception:
         pass
     
     keyboard = [[InlineKeyboardButton("⬅️ رجوع لتعديل تاريخ الميلاد", callback_data="back_to_lastname")]]
     await update.message.reply_text(
-        text=f"✅ تم حفظ التاريخ: *{birth_date}*\n\n📧 الآن، يرجى إرسال **البريد الإلكتروني الأساسي** للحساب من بوت إيميلاتك:",
+        text=f"✅ تم حفظ التاريخ: *{birth_date}*\n\n📧 الآن، يرجى إرسال **البريد الإلكتروني الأساسي** للحساب:",
         reply_markup=InlineKeyboardMarkup(keyboard),
         parse_mode="Markdown"
     )
@@ -198,25 +198,69 @@ async def process_email(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
     email = update.message.text.strip().lower()
     
     if not is_valid_email(email):
-        await update.message.reply_text("⚠️ البريد الإلكتروني غير صالح! يرجى التأكد من كتابة إيميل حقيقي وصحيح:")
+        await update.message.reply_text("⚠️ البريد الإلكتروني غير صالح! يرجى التأكد من كتابة إيميل صحيح:")
         return GET_EMAIL
         
     context.user_data['email'] = email
     page = context.user_data['page']
     
     try:
-        await human_type(page, "name@example.com", 'input[name="emailAddress"]', email)
+        await inject_value_by_selector(page, 'input[aria-label="name@example.com"], input[name="emailAddress"]', email)
     except Exception:
         pass
         
-    await page.click('button[id="send-code-button"]')
-    
-    keyboard = [
-        [InlineKeyboardButton("🔄 إعادة طلب كود جديد من آبل", callback_data="resend_email_code")],
-        [InlineKeyboardButton("⬅️ رجوع لتعديل الإيميل", callback_data="back_to_birthdate")]
-    ]
+    keyboard = [[InlineKeyboardButton("⬅️ رجوع لتعديل الإيميل", callback_data="back_to_birthdate")]]
     await update.message.reply_text(
-        text=f"📨 تم وضع الإيميل: *{email}*\nوجاري طلب الرمز من آبل...\n\nمن فضلك جلب الكود من بوت إيميلاتك وأرسله هنا (أرقام فقط):",
+        text=f"✅ تم حفظ البريد الإلكتروني: *{email}*\n\n🔑 الآن، يرجى إرسال **كلمة السر** التي ترغب في تعيينها للحساب الجديد (يجب أن تحتوي على أرقام وحروف كابيتال وصغيرة ورموز):",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode="Markdown"
+    )
+    return GET_PASSWORD
+
+# [إضافة جديدة] خطوة استقبال الباسورد اليدوي
+async def process_password(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    password = update.message.text.strip()
+    
+    if len(password) < 8:
+        await update.message.reply_text("⚠️ كلمة السر ضعيفة جداً! يرجى إرسال كلمة سر قوية لا تقل عن 8 خانات:")
+        return GET_PASSWORD
+        
+    context.user_data['password'] = password
+    page = context.user_data['page']
+    
+    try:
+        await inject_value_by_selector(page, 'input[aria-label="Password"], input[name="password"]', password)
+    except Exception:
+        pass
+        
+    keyboard = [[InlineKeyboardButton("⬅️ رجوع لتعديل كلمة السر", callback_data="back_to_email")]]
+    await update.message.reply_text(
+        text="✅ تم إدخال كلمة السر في المتصفح.\n\n🔄 يرجى **إعادة إرسال نفس كلمة السر** الآن لتأكيدها وضغط زر الإرسال بموقع آبل:",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode="Markdown"
+    )
+    return GET_PASSWORD_CONFIRM
+
+# [إضافة جديدة] تأكيد الباسورد وطلب كود التفعيل
+async def process_password_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    password_confirm = update.message.text.strip()
+    
+    if password_confirm != context.user_data.get('password'):
+        await update.message.reply_text("❌ كلمات السر غير متطابقة! يرجى إرسال تأكيد كلمة السر بشكل صحيح ومطابق للمرة الأولى:")
+        return GET_PASSWORD_CONFIRM
+        
+    page = context.user_data['page']
+    
+    try:
+        await inject_value_by_selector(page, 'input[aria-label="Confirm Password"], input[name="confirmPassword"]', password_confirm)
+        # الضغط على زر إرسال كود التفعيل بعد اكتمال إدخال الباسورد
+        await page.click('button[id="send-code-button"]')
+    except Exception:
+        pass
+
+    keyboard = [[InlineKeyboardButton("🔄 إعادة طلب كود جديد من آبل", callback_data="resend_email_code")]]
+    await update.message.reply_text(
+        text="📨 تم إدخال البيانات كاملة وتأكيد كلمة السر بنجاح، وجاري طلب كود التحقق من آبل...\n\nمن فضلك جلب الكود من بوت إيميلاتك وأرسله هنا (أرقام فقط):",
         reply_markup=InlineKeyboardMarkup(keyboard),
         parse_mode="Markdown"
     )
@@ -226,7 +270,7 @@ async def process_email_code(update: Update, context: ContextTypes.DEFAULT_TYPE)
     code = update.message.text.strip()
     
     if not code.isdigit() or len(code) < 6:
-        await update.message.reply_text("⚠️ الكود غير صالح! يجب أن يتكون كود آبل من أرقام فقط (مثال: 6 خانات):")
+        await update.message.reply_text("⚠️ الكود غير صالح! يجب أن يتكون من أرقام فقط (6 خانات):")
         return GET_EMAIL_CODE
         
     page = context.user_data['page']
@@ -246,7 +290,7 @@ async def process_phone(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
     page = context.user_data['page']
     
     try:
-        await human_type(page, "Phone Number", 'input[name="phoneNumber"]', phone)
+        await inject_value_by_selector(page, 'input[aria-label="Phone Number"], input[name="phoneNumber"]', phone)
     except Exception:
         pass
         
@@ -257,7 +301,7 @@ async def process_phone(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
         [InlineKeyboardButton("🔄 إعادة إرسال كود الهاتف", callback_data="resend_sms_code")]
     ]
     await update.message.reply_text(
-        text=f"📨 تم إرسال طلب الرمز إلى الرقم: *{phone}*\n\nعندما يصلك الكود من موقع الأرقام, أرسله لي هنا فوراً لتأكيد الحساب ودخول لوحة التحكم:",
+        text=f"📨 تم إرسال طلب الرمز إلى الرقم: *{phone}*\n\nعندما يصلك الكود من موقع الأرقام، أرسله لي هنا فوراً لتأكيد الحساب ودخول لوحة التحكم:",
         reply_markup=InlineKeyboardMarkup(keyboard),
         parse_mode="Markdown"
     )
@@ -277,7 +321,7 @@ async def process_phone_code(update: Update, context: ContextTypes.DEFAULT_TYPE)
         [InlineKeyboardButton("❌ إلغاء الحساب وإغلاق الجلسة", callback_data="btn_cancel")]
     ]
     await update.message.reply_text(
-        text="🎉 **مبروك! تم إنشاء الحساب بنجاح والدخول للوحة التحكم بالخلفية.**\n\nنحن الآن في مرحلة التطهير وإزالة الرقم. اضغط على الزر أدناه لإدخل بريد الاسترداد لبدء التطهير التلقائي بنقرة واحدة:",
+        text="🎉 **مبروك! تم إنشاء الحساب بنجاح والدخول للوحة التحكم بالخلفية.**\n\nنحن الآن في مرحلة التطهير وإزالة الرقم. اضغط على الزر أدناه لإدخال بريد الاسترداد لبدء التطهير التلقائي بنقرة واحدة:",
         reply_markup=InlineKeyboardMarkup(keyboard),
         parse_mode="Markdown"
     )
@@ -334,14 +378,15 @@ async def process_smart_cleanup(update: Update, context: ContextTypes.DEFAULT_TY
     await page.click('button[id="confirm-delete-phone-btn"]')
     
     email = context.user_data['email']
+    pwd = context.user_data['password']
     rescue = context.user_data['rescue_email']
     
     report_text = (
         "✅ **تم تنظيف الحساب وحذف الرقم المؤقت بنجاح تـام!**\n\n"
         f"📧 **Apple ID:** `{email}`\n"
-        f"🔑 **Password:** `Aa112233!!` (تلقائي)\n"
+        f"🔑 **Password:** `{pwd}`\n"
         f"🛡️ **Rescue Email:** `{rescue}`\n\n"
-        f"⚙️ **أسئلة الأمان المحفوظة بالحلفية:**\n`{questions_data}`\n\n"
+        f"⚙️ **أسئلة الأمان المحفوظة بالخلفية:**\n`{questions_data}`\n\n"
         "الحساب الآن يعمل بالإيميل والأسئلة فقط وجاهز تماماً للتسليم أو البيع في الأسواق."
     )
     
@@ -366,7 +411,7 @@ async def handle_back_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE
     
     cmd = query.data
     if cmd == "back_to_start":
-        await query.edit_message_text(text="📝 أوه، تريد التعديل؟ من فضلك أدخل **الاسم الأول** الجديد:")
+        await query.edit_message_text(text="📝 من فضلك أدخل **الاسم الأول** الجديد:")
         return GET_FIRST_NAME
     elif cmd == "back_to_firstname":
         await query.edit_message_text(text="📝 من فضلك أدخل **اسم العائلة (اللقب)** الجديد:")
@@ -377,6 +422,9 @@ async def handle_back_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE
     elif cmd == "back_to_birthdate":
         await query.edit_message_text(text="📧 من فضلك أدخل **البريد الإلكتروني الأساسي** الجديد:")
         return GET_EMAIL
+    elif cmd == "back_to_email":
+        await query.edit_message_text(text="🔑 من فضلك أدخل **كلمة السر** الجديدة:")
+        return GET_PASSWORD
     elif cmd == "resend_email_code":
         page = context.user_data['page']
         await page.click('button[id="resend-email-code-btn"]')
@@ -427,9 +475,17 @@ def main():
                 MessageHandler(filters.TEXT & ~filters.COMMAND, process_email),
                 CallbackQueryHandler(handle_back_buttons, pattern="^back_to_lastname$")
             ],
+            GET_PASSWORD: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, process_password),
+                CallbackQueryHandler(handle_back_buttons, pattern="^back_to_birthdate$")
+            ],
+            GET_PASSWORD_CONFIRM: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, process_password_confirm),
+                CallbackQueryHandler(handle_back_buttons, pattern="^back_to_email$")
+            ],
             GET_EMAIL_CODE: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, process_email_code),
-                CallbackQueryHandler(handle_back_buttons, pattern="^back_to_birthdate|^resend_email_code")
+                CallbackQueryHandler(handle_back_buttons, pattern="^resend_email_code")
             ],
             GET_PHONE: [MessageHandler(filters.TEXT & ~filters.COMMAND, process_phone)],
             GET_PHONE_CODE: [MessageHandler(filters.TEXT & ~filters.COMMAND, process_phone_code)],

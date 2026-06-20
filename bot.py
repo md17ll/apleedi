@@ -39,6 +39,24 @@ def is_valid_date(date_str):
 def is_valid_email(email_str):
     return bool(re.match(r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$', email_str))
 
+# دالة ذكية مخصصة للكتابة بمحاكاة بشرية داخل خانات آبل المعقدة
+async def human_type(page, placeholder_text, fallback_selector, text_to_write):
+    try:
+        # محاولة العثور على العنصر والتركيز عليه
+        element = page.get_by_placeholder(placeholder_text, exact=False)
+        await element.scroll_into_view_if_needed()
+        await element.click(timeout=8000)
+        await element.press("Control+A")
+        await element.press("Backspace")
+        await element.type(text_to_write, delay=100) # كتابة مع تأخير بسيط لمحاكاة البشر
+    except Exception:
+        # حل بديل عبر الـ Selector الأساسي إذا فشل الـ Placeholder
+        await page.scroll_into_view_if_needed(fallback_selector)
+        await page.click(fallback_selector, timeout=5000)
+        await page.press(fallback_selector, "Control+A")
+        await page.press(fallback_selector, "Backspace")
+        await page.type(fallback_selector, text_to_write, delay=100)
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     query = update.callback_query
     await close_browser_context(context)
@@ -70,12 +88,12 @@ async def start_create(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
             
         browser = await playwright.chromium.launch(headless=True, **browser_args)
         
-        # [تعديل] إضافة User-Agent لتبدو الجلسة كمتصفح طبيعي تماماً
         user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
         page = await browser.new_page(user_agent=user_agent)
         
         await page.goto("https://appleid.apple.com/account", timeout=60000)
         await page.wait_for_load_state("networkidle")
+        await page.wait_for_timeout(3000) # وقت إضافي للتأكد من استقرار الواجهة
         
         context.user_data['playwright'] = playwright
         context.user_data['browser'] = browser
@@ -106,25 +124,18 @@ async def process_first_name(update: Update, context: ContextTypes.DEFAULT_TYPE)
     page = context.user_data['page']
     
     try:
-        # المحاولة الأولى بالبحث الذكي
-        await page.get_by_placeholder("First Name", exact=False).fill(first_name, timeout=15000)
-    except Exception:
-        try:
-            # المحاولة البديلة بالـ Selector القياسي
-            await page.fill('input[name="firstName"]', first_name, timeout=5000)
-        except Exception as err:
-            # [ميزة ذكية] إذا فشل تماماً، يلتقط صورة للموقع ويرسلها لك لتشاهد الحظر أو الخطأ بنفسك
-            logger.error(f"Failed to fill first name: {err}")
-            screenshot_path = "error_screen.png"
-            await page.screenshot(path=screenshot_path)
-            
-            await update.message.reply_text("⚠️ علق المتصفح ولم يجد الخانة. إليك لقطة شاشة لما يظهر لآبل حالياً بالخلفية:")
-            with open(screenshot_path, 'rb') as photo:
-                await update.message.reply_photo(photo=photo)
-                
-            await update.message.reply_text("ملاحظة: إذا ظهرت الصفحة بيضاء أو بها رسالة حظر، فأنت بحاجة لإضافة البروكسي المنزلي في الـ Variables.")
-            await close_browser_context(context)
-            return ConversationHandler.END
+        # استخدام الدالة الذكية المحدثة للكتابة والمحاكاة البشرية
+        await human_type(page, "First Name", 'input[name="firstName"]', first_name)
+    except Exception as err:
+        logger.error(f"Failed to fill first name: {err}")
+        screenshot_path = "error_screen.png"
+        await page.screenshot(path=screenshot_path)
+        
+        await update.message.reply_text("⚠️ عجز البوت عن إدخال الاسم بالخلفية. إليك لقطة الشاشة الحالية للموقع:")
+        with open(screenshot_path, 'rb') as photo:
+            await update.message.reply_photo(photo=photo)
+        await close_browser_context(context)
+        return ConversationHandler.END
     
     keyboard = [[InlineKeyboardButton("⬅️ رجوع لتعديل الاسم الأول", callback_data="back_to_start")]]
     await update.message.reply_text(
@@ -145,9 +156,9 @@ async def process_last_name(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     page = context.user_data['page']
     
     try:
-        await page.get_by_placeholder("Last Name", exact=False).fill(last_name, timeout=10000)
+        await human_type(page, "Last Name", 'input[name="lastName"]', last_name)
     except Exception:
-        await page.fill('input[name="lastName"]', last_name)
+        pass
     
     keyboard = [[InlineKeyboardButton("⬅️ رجوع لتعديل اللقب", callback_data="back_to_firstname")]]
     await update.message.reply_text(
@@ -169,13 +180,11 @@ async def process_birth_date(update: Update, context: ContextTypes.DEFAULT_TYPE)
     
     day, month, year = birth_date.split('/')
     try:
-        await page.get_by_placeholder("dd").fill(day, timeout=5000)
-        await page.get_by_placeholder("mm").fill(month)
-        await page.get_by_placeholder("yyyy").fill(year)
+        await human_type(page, "dd", 'input[name="birthDay"]', day)
+        await human_type(page, "mm", 'input[name="birthMonth"]', month)
+        await human_type(page, "yyyy", 'input[name="birthYear"]', year)
     except Exception:
-        await page.fill('input[name="birthDay"]', day)
-        await page.fill('input[name="birthMonth"]', month)
-        await page.fill('input[name="birthYear"]', year)
+        pass
     
     keyboard = [[InlineKeyboardButton("⬅️ رجوع لتعديل تاريخ الميلاد", callback_data="back_to_lastname")]]
     await update.message.reply_text(
@@ -196,9 +205,9 @@ async def process_email(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
     page = context.user_data['page']
     
     try:
-        await page.get_by_placeholder("name@example.com", exact=False).fill(email, timeout=10000)
+        await human_type(page, "name@example.com", 'input[name="emailAddress"]', email)
     except Exception:
-        await page.fill('input[name="emailAddress"]', email)
+        pass
         
     await page.click('button[id="send-code-button"]')
     
@@ -237,9 +246,9 @@ async def process_phone(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
     page = context.user_data['page']
     
     try:
-        await page.get_by_placeholder("Phone Number", exact=False).fill(phone, timeout=10000)
+        await human_type(page, "Phone Number", 'input[name="phoneNumber"]', phone)
     except Exception:
-        await page.fill('input[name="phoneNumber"]', phone)
+        pass
         
     await page.click('button[id="send-sms-button"]')
     
@@ -268,7 +277,7 @@ async def process_phone_code(update: Update, context: ContextTypes.DEFAULT_TYPE)
         [InlineKeyboardButton("❌ إلغاء الحساب وإغلاق الجلسة", callback_data="btn_cancel")]
     ]
     await update.message.reply_text(
-        text="🎉 **مبروك! تم إنشاء الحساب بنجاح والدخول للوحة التحكم بالخلفية.**\n\nنحن الآن في مرحلة التطهير وإزالة الرقم. اضغط على الزر أدناه لإدخال بريد الاسترداد لبدء التطهير التلقائي بنقرة واحدة:",
+        text="🎉 **مبروك! تم إنشاء الحساب بنجاح والدخول للوحة التحكم بالخلفية.**\n\nنحن الآن في مرحلة التطهير وإزالة الرقم. اضغط على الزر أدناه لإدخل بريد الاسترداد لبدء التطهير التلقائي بنقرة واحدة:",
         reply_markup=InlineKeyboardMarkup(keyboard),
         parse_mode="Markdown"
     )

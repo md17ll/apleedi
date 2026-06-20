@@ -2,7 +2,8 @@
 python = {}
 
 [build]
-cmds = ["pip install -r requirements.txt", "playwright install chromium --with-deps"]
+aptPkgs = ["build-essential", "python3-dev"]
+cmds = ["pip install --upgrade pip", "pip install -r requirements.txt", "playwright install chromium --with-deps"]
 
 [start]
 cmd = "python bot.py"
